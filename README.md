@@ -1,8 +1,13 @@
 # Representation superposition is an underlying mechanism of neural scaling laws
 
-This is the github repo for the paper ["Superposition Yields Robust Neural Scaling"](https://arxiv.org/abs/2505.10465).
+This is the official github repo for the paper [Superposition Yields Robust Neural Scaling](https://arxiv.org/abs/2505.10465), Yizhou Liu, Ziming Liu, and Jeff Gore, NeurIPS 2025 (Oral, Best Paper Runner-up).
 
-Superposition means that models represent more features than dimensions they have, which is true for LLMs since there are too many things to represent in language. We find that superposition leads to a power-law loss with width, leading to the observed neural scaling law.
+<p align="center" width="100%">
+<img src="./figures/best_paper.jpeg" alt="Alt Text" style="width:100%; min-width: 200px; display: block; margin: auto;">
+</p>
+
+## Overview of results
+Superposition means that models represent more features than dimensions they have, which is true for LLMs since there are too many things to represent in language. We find that superposition leads to a power-law loss with width without assuming power laws elsewhere, leading to the observed neural scaling law. And the reason for the power law is geometric constraint of representations.
 
 The code of the following figure is ['./exp/exp-17.py'](./exp/exp-17.py)
 
@@ -25,7 +30,7 @@ Weight decay (or growth when the value is negative) can control superposition re
 The code of the following figure is ['./exp/exp-10.py'](./exp/exp-10.py) and ['./exp/exp-10-3.py'](./exp/exp-10-3.py)
 
 <p align="center" width="100%">
-<img src="./figures/Fig-3-2.png" alt="Alt Text" style="width:100%; min-width: 200px; display: block; margin: auto;">
+<img src="./figures/Fig-3-3.png" alt="Alt Text" style="width:100%; min-width: 200px; display: block; margin: auto;">
 </p>
 
 ## Rich phenomena
@@ -45,7 +50,7 @@ In the weak superposition regime (weight decay is large), the loss is well descr
 The data are from ['./exp/exp-10.py'](./exp/exp-10.py) and ['./exp/exp-10-3.py'](./exp/exp-10-3.py).
 
 <p align="center" width="100%">
-<img src="./figures/Fig-5-1.png" alt="Alt Text" style="width:100%; min-width: 200px; display: block; margin: auto;">
+<img src="./figures/Fig-4-4.png" alt="Alt Text" style="width:100%; min-width: 200px; display: block; margin: auto;">
 </p>
 
 ## Strong superposition
@@ -55,7 +60,7 @@ Scaling behavior in the strong superposition regime is robust due to generic geo
 The data are from ['./exp/exp-10.py'](./exp/exp-10.py) and ['./exp/exp-10-3.py'](./exp/exp-10-3.py).
 
 <p align="center" width="100%">
-<img src="./figures/Fig-6-3.png" alt="Alt Text" style="width:100%; min-width: 200px; display: block; margin: auto;">
+<img src="./figures/Fig-5-2.png" alt="Alt Text" style="width:100%; min-width: 200px; display: block; margin: auto;">
 </p>
 
 ## Activation density
@@ -77,3 +82,14 @@ Analysis of overlaps is in ['./LLMs/overlap-0.py'](./LLMs/overlap-0.py). We also
 <p align="center" width="100%">
 <img src="./figures/Fig-8-2.png" alt="Alt Text" style="width:100%; min-width: 200px; display: block; margin: auto;">
 </p>
+
+## Citation
+
+```
+@article{liu2025superposition,
+  title={Superposition yields robust neural scaling},
+  author={Liu, Yizhou and Liu, Ziming and Gore, Jeff},
+  journal={arXiv preprint arXiv:2505.10465},
+  year={2025}
+}
+```
