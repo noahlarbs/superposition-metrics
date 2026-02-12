@@ -93,3 +93,8 @@ Analysis of overlaps is in ['./LLMs/overlap-0.py'](./LLMs/overlap-0.py). We also
   year={2025}
 }
 ```
+
+## Interested in Other Neural Scaling Laws?
+
+- Depth Scaling Due to Limited Transformation: Inverse Depth Scaling From Most Layers Being Similar ([paper link](https://arxiv.org/abs/2602.05970), [code link](https://github.com/liuyz0/DepthScaling))
+- Time Scaling Due to Limited Training: Universal One-third Time Scaling in Learning Peaked Distributions ([paper link](https://arxiv.org/abs/2602.03685), [code link](https://github.com/liuyz0/TimeScaling))
