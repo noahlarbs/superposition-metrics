@@ -8,6 +8,7 @@ import math
 import argparse
 from adamw import AdamW
 import time
+from pr_dim import compute_pr_dim
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--n", type=int, default=10240, help="output dimension")
@@ -16,6 +17,7 @@ parser.add_argument("--weight_decay", type=float, default=-1.0, help="weight dec
 parser.add_argument("--batch_size", type=int, default=8192, help="batch size")
 parser.add_argument("--n_steps", type=int, default=40000, help="number of steps")
 parser.add_argument("--dist", type=str, default="power", help="distribution of features")
+parser.add_argument("--log_pr_dim", action="store_true", help="log PR dimension (intrinsic dimensionality) alongside loss")
 
 args = parser.parse_args()
 
@@ -52,9 +54,13 @@ class FeatureRecovery(nn.Module):
         self.W = nn.Parameter(torch.randn(n, m) / math.sqrt(m))
         self.b = nn.Parameter(torch.randn(n))
         self.relu = nn.ReLU()
-    def forward(self, x):
+    def forward(self, x, return_hidden=False):
         # x [batch_size, n]
-        return self.relu(x @ self.W @ self.W.T + self.b)
+        hidden = x @ self.W  # [batch_size, m] - hidden layer activations
+        out = self.relu(hidden @ self.W.T + self.b)
+        if return_hidden:
+            return out, hidden
+        return out
 
 def get_lr(step, n_steps, warmup_ratio=.1):
     assert warmup_ratio <= 1
@@ -71,6 +77,7 @@ results = {}
 Ws = {}
 results['m_ran'] = m_ran
 losses = torch.zeros(len(m_ran), args.n_steps)
+pr_dims = torch.zeros(len(m_ran), args.n_steps) if args.log_pr_dim else None
 
 for m_i, m in enumerate(m_ran):
     t0 = time.perf_counter()
@@ -92,7 +99,12 @@ for m_i, m in enumerate(m_ran):
             param_group['lr'] = param_group["init_lr"] * get_lr(step, args.n_steps,warmup_ratio=.05)
         # training
         #with torch.autocast(device_type=device.type):
-        y = model(x)
+        if args.log_pr_dim:
+            y, hidden = model(x, return_hidden=True)
+            with torch.no_grad():
+                pr_dims[m_i, step] = compute_pr_dim(hidden.detach()).item()
+        else:
+            y = model(x)
         loss = criteria(y, x) * 100
         losses[m_i, step] = loss.item() / 100
         loss.backward()
@@ -104,9 +116,12 @@ for m_i, m in enumerate(m_ran):
         '''
 
     Ws[m_i] = model.W.detach().cpu()
-    print(f"m: {m}, Loss: {losses[m_i,-1]:.2e}, Run time: {time.perf_counter() - t0:.2f}s")
+    pr_str = f", D_PR: {pr_dims[m_i, -1]:.2f}" if args.log_pr_dim else ""
+    print(f"m: {m}, Loss: {losses[m_i,-1]:.2e}{pr_str}, Run time: {time.perf_counter() - t0:.2f}s")
 
 results['losses'] = losses
 results['W'] = Ws
+if args.log_pr_dim:
+    results['pr_dims'] = pr_dims
 
 torch.save(results, f"../outputs/exp-17-{args.dist}_{args.weight_decay:.2f}.pt")
