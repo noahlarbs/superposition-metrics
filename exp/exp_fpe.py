@@ -123,11 +123,14 @@ def main():
     parser.add_argument("--n_steps_post", type=int, default=2000, help="steps after FPE intervention")
     parser.add_argument("--log_interval", type=int, default=500, help="log every N steps")
     parser.add_argument("--alpha", type=float, default=0.0, help="feature distribution power-law exponent")
-    parser.add_argument("--output", type=str, default="../outputs/exp_fpe.pt", help="output path")
+    parser.add_argument("--output", type=str, default=None, help="output path. If not provided, dynamically generated.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    if args.output is None:
+        args.output = f"../outputs/exp_fpe_n{args.n}_m{args.m}_pre{args.n_steps_pre}_post{args.n_steps_post}.pt"
 
     # Feature distribution
     prob = torch.tensor([1.0 / i ** (1 + args.alpha) for i in range(1, args.n + 1)])

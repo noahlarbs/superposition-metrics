@@ -2,10 +2,21 @@ import torch
 import matplotlib.pyplot as plt
 import os
 
+import argparse
+
 def main():
-    data_path = "../outputs/exp_fpe.pt"
+    parser = argparse.ArgumentParser(description="Plot FPE Experiment Results")
+    parser.add_argument("--data_path", type=str, default=None, help="Path to the .pt file to plot")
+    args_cmd = parser.parse_args()
+
+    if args_cmd.data_path is None:
+        # Default to a generic pattern or require specifying
+        data_path = "../outputs/exp_fpe.pt" # We'll leave as default or perhaps just prompt user
+    else:
+        data_path = args_cmd.data_path
+
     if not os.path.exists(data_path):
-        print(f"Error: Data file {data_path} not found.")
+        print(f"Error: Data file {data_path} not found. Please provide a path using --data_path")
         return
 
     data = torch.load(data_path, map_location="cpu")
