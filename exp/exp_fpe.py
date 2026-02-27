@@ -57,6 +57,7 @@ def split_polysemantic_neurons(W, n_children=2, reference_W=None):
 
     Returns:
         W_new: [n, m_new] expanded weight matrix
+        n_split: number of neurons that were split
     """
     if reference_W is None:
         reference_W = W
@@ -64,6 +65,7 @@ def split_polysemantic_neurons(W, n_children=2, reference_W=None):
     n, m = W.shape
 
     new_columns = []
+    split_indices = []
     for j in range(m):
         w = W[:, j]
         ref_w = reference_W[:, j]
@@ -74,6 +76,7 @@ def split_polysemantic_neurons(W, n_children=2, reference_W=None):
             new_columns.append(w.unsqueeze(1))
         else:
             # Polysemantic: partition connections disjointly across children
+            split_indices.append(j)
             idx_list = nonzero_idx.tolist()
             n_conn = len(idx_list)
             n_splits = min(n_children, n_conn)
@@ -94,10 +97,10 @@ def split_polysemantic_neurons(W, n_children=2, reference_W=None):
                 new_columns.append(w_child.unsqueeze(1))
 
     if not new_columns:
-        return W
+        return W, []
 
     W_new = torch.cat(new_columns, dim=1)
-    return W_new
+    return W_new, split_indices
 
 
 def get_lr(step, lr, n_steps, warmup_steps=2000):
@@ -194,12 +197,21 @@ def main():
     m_old = W_old.shape[1]
     nnz_before = (W_old.abs() > WEIGHT_THRESHOLD).sum().item()
 
-    W_new = split_polysemantic_neurons(W_old)
+    W_new, split_indices = split_polysemantic_neurons(W_old)
+    n_split = len(split_indices)
     m_new = W_new.shape[1]
     nnz_after = (W_new.abs() > WEIGHT_THRESHOLD).sum().item()
 
     print(f"\n--- FPE intervention at step {split_step} ---")
-    print(f"  Neurons: {m_old} -> {m_new} | Non-zeros: {nnz_before} -> {nnz_after} (sparsity preserved)")
+    print(f"  Hidden Layer Neurons: {m_old} -> {m_new} ({n_split} neurons split)")
+    
+    if m_old > 0:
+        percent_split = (n_split / m_old) * 100
+        print(f"  Percentage of neurons split in Layer 1 (Input Weights W): {percent_split:.2f}%")
+        print(f"  Percentage of neurons split in Layer 2 (Output Weights W.T): {percent_split:.2f}%")
+        print(f"  (Note: In this tied-weight architecture, splitting a hidden neuron inherently splits its symmetric input and output weights simultaneously)")
+
+    print(f"  Non-zeros: {nnz_before} -> {nnz_after} (sparsity preserved)")
 
     # Build expanded model
     # Build expanded model
@@ -223,8 +235,8 @@ def main():
         
         if 'exp_avg' in old_state_W:
             # Apply the exact same splitting logic to the momentum tensors
-            new_state_W['exp_avg'] = split_polysemantic_neurons(old_state_W['exp_avg'], reference_W=W_old)
-            new_state_W['exp_avg_sq'] = split_polysemantic_neurons(old_state_W['exp_avg_sq'], reference_W=W_old)
+            new_state_W['exp_avg'], _ = split_polysemantic_neurons(old_state_W['exp_avg'], reference_W=W_old)
+            new_state_W['exp_avg_sq'], _ = split_polysemantic_neurons(old_state_W['exp_avg_sq'], reference_W=W_old)
             new_state_W['step'] = old_state_W['step']
             
             # Copy biases state directly (b shape doesn't change, no split needed)
@@ -235,6 +247,9 @@ def main():
     # Safely overwrite the old model and optimizer
     model = new_model
     optimizer = new_optimizer
+
+    # Create a mask to enforce sparsity during Phase 2
+    sparsity_mask = (model.W.abs() > 0).float()
 
     # === AFTER SPLIT (immediately after, no training step) ===
     with torch.no_grad():
@@ -270,6 +285,10 @@ def main():
         y, hidden = model(x, return_hidden=True)
         loss = criteria(y, x)
         loss.backward()
+
+        # Enforce sparsity!
+        model.W.grad.data *= sparsity_mask
+
         optimizer.step()
 
         with torch.no_grad():
@@ -289,7 +308,9 @@ def main():
         "pr_dim": pr_dims[-1],
         "step": n_steps_total - 1,
     }
-    print(f"\n  [End] step {n_steps_total} | loss: {losses[-1]:.4e} | D_PR: {pr_dims[-1]:.2f}")
+    
+    final_nnz = (model.W.abs() > WEIGHT_THRESHOLD).sum().item()
+    print(f"\n  [End] step {n_steps_total} | loss: {losses[-1]:.4e} | D_PR: {pr_dims[-1]:.2f} | Final Non-zeros: {final_nnz}")
 
     # Summary
     print("\n--- Delta summary ---")
