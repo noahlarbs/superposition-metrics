@@ -1,3 +1,4 @@
+%%writefile exp_fpe_transformer_tinystories.py
 """
 Targeted FPE Transformer on TinyStories - Paper Validation Run
 
