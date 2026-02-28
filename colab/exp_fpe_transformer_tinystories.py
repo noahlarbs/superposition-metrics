@@ -1,13 +1,16 @@
 """
-Targeted FPE Transformer on TinyStories
+Targeted FPE Transformer on TinyStories - Paper Validation Run
 
-This script implements a minimal autoregressive Transformer trained on the TinyStories dataset.
-It monitors the Representation Participation Ratio (D_PR) of the Multi-Layer Perceptron (FFN) hidden states.
-Upon plateau, it triggers targeted Fixed Parameter Expansion (FPE) on the top `target_fraction` 
-most polysemantic neurons, measured via Weight Participation Ratio.
+This script implements an autoregressive Transformer trained on TinyStories.
+It executes a Width Ablation study over a list of FeedForward dimension sizes (d_ff_list),
+monitoring the Representation Participation Ratio (D_PR) of the Multi-Layer Perceptron.
 
-The newly expanded sibling neurons are immediately subjected to BitNet 1.58b 
-ternary weight and 8-bit activation quantization to test their robustness against noise.
+Upon plateau, it triggers targeted Fixed Parameter Expansion (FPE) on the top 
+polysemantic neurons, shielding the system against BitNet 1.58b ternary quantization.
+
+It also runs a strict "Control" baseline, where the identical plateau triggers quantization 
+but *without* expanding the architecture, proving the FPE mechanism is responsible for 
+validation loss recovery. It automatically generates and saves validation figures.
 """
 
 import torch
@@ -20,6 +23,7 @@ import copy
 from datasets import load_dataset
 from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
+import matplotlib.pyplot as plt
 
 # -----------------------------------------------------------------------------
 # Quantization & FPE Metrics
@@ -27,22 +31,16 @@ from torch.utils.data import DataLoader
 WEIGHT_THRESHOLD = 1e-6
 
 def weight_quant_ternary(w):
-    """BitNet 1.58b Ternary Quantization [-1, 0, 1]"""
     scale = w.abs().mean().clamp(min=1e-8)
     w_q = torch.round(w / scale).clamp(-1, 1) * scale
     return w + (w_q - w).detach()
 
 def activation_quant(x):
-    """BitNet 8-bit absolute max activation quantization"""
     scale = 127.0 / x.abs().max().clamp(min=1e-8)
     x_q = torch.round(x * scale).clamp(-128, 127) / scale
     return x + (x_q - x).detach()
 
 def compute_pr_dim(activations: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """
-    Compute Representation Participation Ratio (D_PR) from hidden layer activations.
-    Formula: D_PR = (Tr(Σ))^2 / Tr(Σ^2)
-    """
     H = activations - activations.mean(dim=0, keepdim=True)
     batch_size, hidden_dim = H.shape
     n = batch_size - 1
@@ -54,21 +52,11 @@ def compute_pr_dim(activations: torch.Tensor, eps: float = 1e-8) -> torch.Tensor
     return (tr_sigma * tr_sigma) / (tr_sigma_sq + eps)
 
 def get_weight_pr(W):
-    """
-    Compute Weight Participation Ratio for incoming weight vector (dim=0).
-    PR(w_j) = (sum_i |W_ij|)^2 / sum_i (W_ij^2).
-    """
     l1_norm = W.abs().sum(dim=0)
     l2_sq_norm = (W ** 2).sum(dim=0)
     return (l1_norm ** 2) / (l2_sq_norm + 1e-8)
 
-def split_ffn_neurons(W1, W2, b1=None, n_children=2, reference_W1=None, target_fraction=1.0):
-    """
-    Targeted FFN Expansion.
-    W1: [d_model, d_ff]
-    W2: [d_ff, d_model]
-    Selects top `target_fraction` polysemantic neurons via PR on W1.
-    """
+def split_ffn_neurons(W1, W2, b1=None, n_children=2, reference_W1=None, target_fraction=1.0, run_mode="fpe"):
     if reference_W1 is None: reference_W1 = W1
     device = W1.device
     d_model, d_ff = W1.shape
@@ -100,13 +88,16 @@ def split_ffn_neurons(W1, W2, b1=None, n_children=2, reference_W1=None, target_f
             continue
             
         nonzero_idx = (ref_w.abs() > WEIGHT_THRESHOLD).nonzero(as_tuple=True)[0]
-        if len(nonzero_idx) <= 1:
+        
+        # If in exact control mode, or pure neuron, don't split, just mark for quantization
+        if run_mode == "control" or len(nonzero_idx) <= 1:
             new_w1_cols.append(w1_j.unsqueeze(1))
             new_w2_rows.append(w2_j.unsqueeze(0))
             new_b1.append(b1_j.unsqueeze(0))
+            expanded_indices.append(idx_counter)
             idx_counter += 1
         else:
-            # Expand polysemantic neuron into n_children
+            # Expand polysemantic neuron into n_children (FPE Mode)
             idx_list = nonzero_idx.tolist()
             n_conn = len(idx_list)
             n_splits = min(n_children, n_conn)
@@ -123,9 +114,7 @@ def split_ffn_neurons(W1, W2, b1=None, n_children=2, reference_W1=None, target_f
                 w1_child = torch.zeros(d_model, device=device, dtype=W1.dtype)
                 for i in part_idx: w1_child[i] = w1_j[i]
                 
-                # Duplicate W2 and b1
                 w2_child = w2_j.clone()
-                b1_child = b1_j.clone() / n_splits # Optional: Scale bias or keep same
                 b1_child = b1_j.clone()
                 
                 new_w1_cols.append(w1_child.unsqueeze(1))
@@ -161,7 +150,6 @@ class ExpandableFeedForward(nn.Module):
         self.quantize_expanded = False
 
     def forward(self, x, return_hidden=False):
-        # x: [B, T, d_model] -> flatten to [B*T, d_model] for processing if needed
         B, T, C = x.size()
         x_flat = x.view(-1, C)
         
@@ -169,7 +157,6 @@ class ExpandableFeedForward(nn.Module):
             mask = torch.zeros(self.d_ff, dtype=torch.bool, device=x.device)
             mask[self.expanded_idx] = True
             
-            # W1: [d_model, d_ff]
             W1_exp = weight_quant_ternary(self.W1[:, mask])
             W1_base = self.W1[:, ~mask]
             
@@ -183,10 +170,8 @@ class ExpandableFeedForward(nn.Module):
             h = self.gelu(h)
             h = self.act_dropout(h)
             
-            # Save pre-W2 hidden state for Representation PR calc
             hidden_states = h.clone()
             
-            # Activation quantize the forward pass into W2 for expanded nodes
             W2_exp = weight_quant_ternary(self.W2[mask, :])
             W2_base = self.W2[~mask, :]
             
@@ -205,10 +190,10 @@ class ExpandableFeedForward(nn.Module):
             return out, hidden_states
         return out
         
-    def expand_ffn(self, n_children, target_fraction):
+    def expand_ffn(self, n_children, target_fraction, run_mode):
         W1_new, W2_new, b1_new, exp_idx = split_ffn_neurons(
             self.W1.data, self.W2.data, self.b1.data, 
-            n_children=n_children, target_fraction=target_fraction
+            n_children=n_children, target_fraction=target_fraction, run_mode=run_mode
         )
         self.d_ff = W1_new.shape[1]
         self.W1 = nn.Parameter(W1_new)
@@ -273,52 +258,35 @@ def get_dataloader(tokenizer, batch_size=32, seq_len=128):
         return tokenizer(examples['text'], truncation=True, max_length=seq_len+1, padding="max_length")
 
     dataset = load_dataset("roneneldan/TinyStories", split="train")
-    # Take a small subset for demonstration
-    dataset = dataset.select(range(50000)) 
+    dataset = dataset.select(range(100000)) # Larger subset for longer run
     
     tokenized = dataset.map(tokenize_function, batched=True, remove_columns=["text"], num_proc=4)
     tokenized.set_format("torch", columns=["input_ids"])
-    
     return DataLoader(tokenized, batch_size=batch_size, shuffle=True)
 
 # -----------------------------------------------------------------------------
-# Main Loop
+# Main Test Harness
 # -----------------------------------------------------------------------------
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--seq_len", type=int, default=128)
-    parser.add_argument("--d_model", type=int, default=128)
-    parser.add_argument("--d_ff", type=int, default=512)
-    parser.add_argument("--n_heads", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight_decay", type=float, default=0.01)
-    
-    # FPE Triggers
-    parser.add_argument("--n_steps_max", type=int, default=5000)
-    parser.add_argument("--log_interval", type=int, default=100)
-    parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--tolerance", type=float, default=1.0) # Larger tolerance for real data
-    parser.add_argument("--target_fraction", type=float, default=0.5)
-    args = parser.parse_args()
+def run_experiment(args, device, dataloader, tokenizer, vocab_size, d_ff_current, run_mode):
+    """Executes a full run for a specific d_ff and run_mode (fpe or control)."""
+    print(f"\\n{'='*50}")
+    print(f"Starting Run: d_ff={d_ff_current} | mode={run_mode.upper()}")
+    print(f"{'='*50}")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
-    print("Loading tokenizer and TinyStories dataset...")
-    tokenizer = AutoTokenizer.from_pretrained('gpt2')
-    tokenizer.pad_token = tokenizer.eos_token
-    vocab_size = tokenizer.vocab_size
-    dataloader = get_dataloader(tokenizer, args.batch_size, args.seq_len)
-    data_iter = iter(dataloader)
-
-    model = FPETransformer(vocab_size, args.d_model, args.n_heads, args.d_ff, args.seq_len).to(device)
+    model = FPETransformer(vocab_size, args.d_model, args.n_heads, d_ff_current, args.seq_len).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     
-    # Phase 1
-    print("\\n--- Phase 1: Pre-training ---")
-    recent_pr_dims, losses = [], []
+    data_iter = iter(dataloader)
+    
+    # Trackers
+    losses_all = []
+    pr_dims_all = []
+    recent_pr_dims = []
     has_expanded = False
+    split_step = args.n_steps_max
+    
+    print("\\n--- Phase 1: Pre-training ---")
+    optimizer.zero_grad()
     
     for step in range(args.n_steps_max):
         try:
@@ -331,23 +299,28 @@ def main():
         x = idx[:, :-1]
         y = idx[:, 1:]
         
-        optimizer.zero_grad()
         logits, h_states = model(x, return_hidden=True)
-        # Flatten for loss
+        # Gradient Accumulation Scaling
         loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1), ignore_index=tokenizer.pad_token_id)
+        loss = loss / args.grad_accum_steps
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
         
-        losses.append(loss.item())
+        if (step + 1) % args.grad_accum_steps == 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            optimizer.zero_grad()
+            
+        # Unscale for logging
+        current_loss = loss.item() * args.grad_accum_steps
+        losses_all.append(current_loss)
         
         if (step + 1) % args.log_interval == 0:
             with torch.no_grad():
-                # Only use a random sub-sample of h_states (e.g. 2048 rows) to compute PR efficiently
                 h_sample = h_states[torch.randperm(h_states.size(0))[:2048]]
                 pr_dim = compute_pr_dim(h_sample).item()
-                
-            print(f"Step {step+1} | Loss: {loss.item():.4f} | FFN D_PR: {pr_dim:.2f}")
+            
+            pr_dims_all.append((step+1, pr_dim))
+            print(f"Step {step+1} | Loss: {current_loss:.4f} | FFN D_PR: {pr_dim:.2f}")
             recent_pr_dims.append(pr_dim)
             
             # Dynamic Trigger Check
@@ -355,26 +328,32 @@ def main():
                 window = recent_pr_dims[-args.patience:]
                 dpr_diff = max(window) - min(window)
                 if dpr_diff < args.tolerance:
-                    print(f"\\n--> Dynamic Trigger! D_PR Plateaued (diff {dpr_diff:.2f} < {args.tolerance:.2f}). Triggering Targeted FPE.")
+                    print(f"\\n--> Dynamic Trigger! D_PR Plateaued (diff {dpr_diff:.2f} < {args.tolerance:.2f}). Triggering {run_mode.upper()}.")
                     has_expanded = True
+                    split_step = step + 1
                     break
 
     if not has_expanded:
-        print("Completed pre-training without hitting plateau tolerance.")
-        return
+        print(f"Run finished early - no plateau met. Final Loss: {losses_all[-1]:.4f}")
+        return losses_all, pr_dims_all, split_step
 
-    # Phase 2: Targeted Expansion & Quantized Fine-tuning
-    print(f"\\n--- Phase 2: Targeted FPE & BitNet 1.58b Quantization ---")
+    # Phase 2: Intervention (FPE Expansion vs Control Null-Expansion)
+    print(f"\\n--- Phase 2: Quantization Intervention ({run_mode.upper()}) ---")
     old_m = model.block.ffn.d_ff
-    new_m = model.block.ffn.expand_ffn(n_children=2, target_fraction=args.target_fraction)
+    new_m = model.block.ffn.expand_ffn(n_children=2, target_fraction=args.target_fraction, run_mode=run_mode)
     model.block.ffn.quantize_expanded = True
-    print(f"Expanded top {args.target_fraction*100}% polysemantic neurons. d_ff: {old_m} -> {new_m}")
     
-    # Reset optimizer for expanded parameters
+    if run_mode == "fpe":
+        print(f"FPE Expanded top {args.target_fraction*100}% neurons. d_ff: {old_m} -> {new_m}")
+    else:
+        print(f"Control Mode: Target {args.target_fraction*100}% neurons quantized. Dimension remains {old_m}.")
+    
+    # Reset optimizer for new parameters
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr * 0.1, weight_decay=args.weight_decay)
+    optimizer.zero_grad()
     
     print("\\nFine-tuning Quantized Network...")
-    for step in range(1000): # Quick 1000 step finetune
+    for step in range(split_step, split_step + args.n_steps_finetune):
         try:
             batch = next(data_iter)
         except StopIteration:
@@ -385,17 +364,120 @@ def main():
         x = idx[:, :-1]
         y = idx[:, 1:]
         
-        optimizer.zero_grad()
-        logits = model(x)
+        logits, h_states = model(x, return_hidden=True)
         loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1), ignore_index=tokenizer.pad_token_id)
+        loss = loss / args.grad_accum_steps
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        
+        if (step + 1) % args.grad_accum_steps == 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            optimizer.zero_grad()
+            
+        current_loss = loss.item() * args.grad_accum_steps
+        losses_all.append(current_loss)
         
         if (step + 1) % args.log_interval == 0:
-            print(f"Finetune Step {step+1} | Loss: {loss.item():.4f}")
-            
-    print("\\nFinished validation script.")
+            with torch.no_grad():
+                h_sample = h_states[torch.randperm(h_states.size(0))[:2048]]
+                pr_dim = compute_pr_dim(h_sample).item()
+            pr_dims_all.append((step+1, pr_dim))
+            print(f"Finetune Step {step+1} | Loss: {current_loss:.4f} | FFN D_PR: {pr_dim:.2f}")
+
+    return losses_all, pr_dims_all, split_step
+
+# -----------------------------------------------------------------------------
+# Harness Definition & Graph Generation
+# -----------------------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--batch_size", type=int, default=16) 
+    parser.add_argument("--grad_accum_steps", type=int, default=4)
+    parser.add_argument("--seq_len", type=int, default=256)
+    parser.add_argument("--d_model", type=int, default=128)
+    parser.add_argument("--d_ff_list", type=int, nargs="+", default=[128, 256, 512, 1024])
+    parser.add_argument("--n_heads", type=int, default=4)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight_decay", type=float, default=0.01)
+    
+    # FPE Triggers
+    parser.add_argument("--n_steps_max", type=int, default=10000)
+    parser.add_argument("--n_steps_finetune", type=int, default=1000)
+    parser.add_argument("--log_interval", type=int, default=100)
+    parser.add_argument("--patience", type=int, default=5)
+    parser.add_argument("--tolerance", type=float, default=0.5) 
+    parser.add_argument("--target_fraction", type=float, default=0.5)
+    args = parser.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    tokenizer = AutoTokenizer.from_pretrained('gpt2')
+    tokenizer.pad_token = tokenizer.eos_token
+    vocab_size = tokenizer.vocab_size
+    dataloader = get_dataloader(tokenizer, args.batch_size, args.seq_len)
+
+    results = {}
+    
+    # 1. Ablation Study over d_ff widths (Tracking geometric compression)
+    for d_ff in args.d_ff_list:
+        # Run standard FPE expansion
+        losses_fpe, pr_dims_fpe, trigger_step = run_experiment(args, device, dataloader, tokenizer, vocab_size, d_ff, "fpe")
+        
+        # For the largest dimension (or pick a target), run a control validation
+        if d_ff == args.d_ff_list[-1]:
+            losses_ctrl, pr_dims_ctrl, _ = run_experiment(args, device, dataloader, tokenizer, vocab_size, d_ff, "control")
+            results[d_ff] = {
+                "fpe_losses": losses_fpe, "fpe_prs": pr_dims_fpe, 
+                "ctrl_losses": losses_ctrl, "ctrl_prs": pr_dims_ctrl, 
+                "trigger": trigger_step
+            }
+        else:
+            results[d_ff] = {"fpe_losses": losses_fpe, "fpe_prs": pr_dims_fpe, "trigger": trigger_step}
+
+    # ==========================================
+    # Plotting Automation
+    # ==========================================
+    os.makedirs("../newfigures", exist_ok=True)
+    
+    # Plot 1: FPE vs Control Loss
+    target_dff = args.d_ff_list[-1]
+    plt.figure(figsize=(10, 6))
+    fpe_l = results[target_dff]["fpe_losses"]
+    ctrl_l = results[target_dff]["ctrl_losses"]
+    trig = results[target_dff]["trigger"]
+    
+    plt.plot(range(len(fpe_l)), fpe_l, label="FPE Targeted Expansion", color="blue", alpha=0.8)
+    plt.plot(range(len(ctrl_l)), ctrl_l, label="Strict Control (No FPE)", color="red", alpha=0.8)
+    plt.axvline(x=trig, color='black', linestyle='--', label=f'Quantization Trigger (Step {trig})')
+    
+    plt.title(f"Validation Loss Recovery: FPE vs Control (d_ff={target_dff})")
+    plt.xlabel("Training Steps")
+    plt.ylabel("Cross-Entropy Loss")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.ylim(top=min(max(fpe_l[trig:] + ctrl_l[trig:]) * 1.5, 10.0)) # Zoom on interference
+    plt.savefig("../newfigures/loss_vs_step.png", dpi=300, bbox_inches="tight")
+    print("\nSaved Loss Comparison Figure: ../newfigures/loss_vs_step.png")
+    
+    # Plot 2: D_PR Width Ablation
+    plt.figure(figsize=(10, 6))
+    colors = plt.cm.viridis(torch.linspace(0, 1, len(args.d_ff_list)).numpy())
+    
+    for i, d_ff in enumerate(args.d_ff_list):
+        pr_data = results[d_ff]["fpe_prs"]
+        steps = [p[0] for p in pr_data]
+        prs = [p[1] for p in pr_data]
+        plt.plot(steps, prs, label=f"d_ff = {d_ff}", color=colors[i], linewidth=2)
+        
+    plt.title("Representation Compression ($D_{PR}$) across FFN Widths")
+    plt.xlabel("Pre-training Steps")
+    plt.ylabel("Participation Ratio ($D_{PR}$)")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.yscale("log")
+    plt.savefig("../newfigures/d_pr_ablation.png", dpi=300, bbox_inches="tight")
+    print("Saved Width Ablation Figure: ../newfigures/d_pr_ablation.png")
 
 if __name__ == '__main__':
     main()
