@@ -614,6 +614,9 @@ def main():
         for q in quants:
             for r in regimes:
                 k = f"L3_{l3c}_{q}_{r['name']}"
+                print(f"\n=======================================================")
+                print(f"🚀 STARTING EXPERIMENT {k}")
+                print(f"=======================================================\n")
                 results[k] = run_transformer_experiment(q, r['is_ageing'], args, device, train_data, val_data, l3_count=l3c)
             
     # Visualize FLOPs vs Loss into 4 Separate Grids
