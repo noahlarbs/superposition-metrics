@@ -7,6 +7,7 @@ import einops
 import argparse
 import os
 import matplotlib.pyplot as plt
+import wandb
 
 # ---------------------------------------------------------
 # FAKE QUANTIZATION OPS (STE) 
@@ -34,18 +35,58 @@ def quantize_ternary(w):
     w_q = torch.round(w / scale).clamp(-1, 1) * scale
     return w + (w_q - w).detach()
 
-def quantize_q2_k(w):
-    scale = 1.0 / w.abs().max().clamp(min=1e-8)
-    w_q = torch.round(w * scale).clamp(-1, 1) / scale 
+def quantize_q2_k(w, block_size=32):
+    orig_shape = w.shape
+    w_flat = w.view(-1)
+    
+    pad_len = (block_size - (w_flat.size(0) % block_size)) % block_size
+    if pad_len > 0:
+        w_padded = torch.cat([w_flat, torch.zeros(pad_len, device=w.device)])
+    else:
+        w_padded = w_flat
+        
+    blocks = w_padded.view(-1, block_size)
+    scales = blocks.abs().max(dim=1, keepdim=True)[0].clamp(min=1e-8)
+    blocks_norm = blocks / scales
+    
+    # 4 distinct states = 2 bits
+    thresholds = torch.tensor([-1.0, -0.33, 0.33, 1.0], device=w.device)
+    diffs = torch.abs(blocks_norm.unsqueeze(-1) - thresholds)
+    min_idx = torch.argmin(diffs, dim=-1)
+    blocks_q = thresholds[min_idx] * scales
+    
+    w_q_flat = blocks_q.view(-1)
+    if pad_len > 0:
+        w_q_flat = w_q_flat[:-pad_len]
+        
+    w_q = w_q_flat.view(orig_shape)
     return w + (w_q - w).detach()
 
-def quantize_iq2_xxs(w):
-    scale = w.abs().max().clamp(min=1e-8)
-    w_norm = w / scale
-    thresholds = torch.tensor([-1.0, -0.33, 0.33, 1.0], device=w.device)
-    diffs = torch.abs(w_norm.unsqueeze(-1) - thresholds)
+def quantize_iq2_xxs(w, block_size=32):
+    orig_shape = w.shape
+    w_flat = w.view(-1)
+    
+    pad_len = (block_size - (w_flat.size(0) % block_size)) % block_size
+    if pad_len > 0:
+        w_padded = torch.cat([w_flat, torch.zeros(pad_len, device=w.device)])
+    else:
+        w_padded = w_flat
+        
+    blocks = w_padded.view(-1, block_size)
+    scales = blocks.abs().max(dim=1, keepdim=True)[0].clamp(min=1e-8)
+    blocks_norm = blocks / scales
+    
+    # iq2_xxs drops extreme weights to a ternary distribution with a heavy zero bias
+    thresholds = torch.tensor([-1.0, 0.0, 1.0], device=w.device)
+    diffs = torch.abs(blocks_norm.unsqueeze(-1) - thresholds)
     min_idx = torch.argmin(diffs, dim=-1)
-    w_q = thresholds[min_idx] * scale
+    blocks_q = thresholds[min_idx] * scales
+    
+    w_q_flat = blocks_q.view(-1)
+    if pad_len > 0:
+        w_q_flat = w_q_flat[:-pad_len]
+        
+    w_q = w_q_flat.view(orig_shape)
     return w + (w_q - w).detach()
 
 # ---------------------------------------------------------
@@ -246,9 +287,22 @@ def get_lr(step, lr, n_steps, warmup_steps=1000):
             return (lr - min_lr) * 0.5 * (1 + math.cos(math.pi * step / n_steps)) + min_lr
 
 def run_experiment(base_quant, is_ageing, args, device):
+    regime_name = 'Progressive Ageing' if is_ageing else 'Fixed FP32'
     print(f"\n=======================================================")
-    print(f"RUNNING: Quant={base_quant} | FPE Regime={'Progressive Ageing' if is_ageing else 'Fixed FP32'}")
+    print(f"RUNNING: Quant={base_quant} | FPE Regime={regime_name}")
     print(f"=======================================================")
+    
+    run_name = f"toy_senn_{base_quant}_{regime_name.replace(' ', '_')}"
+    wandb.init(
+        project="superposition-metrics",
+        name=run_name,
+        config={
+            **vars(args),
+            "base_quant": base_quant,
+            "is_ageing": is_ageing,
+            "architecture": "toy_model_senn"
+        }
+    )
     
     n_features = args.n_features
     # Start tight
@@ -358,12 +412,21 @@ def run_experiment(base_quant, is_ageing, args, device):
                         fpe_events.append({'step': step, 'm': new_m, 'eff_rank': pr_f})
                         print(f"  --> Detonated to {new_m} widths! New FIM PR: {compute_fisher_pr(hidden.grad):.3f}")
                         
-                        # Print updated BPW report
-                        print_quantization_report(base_quant, is_ageing, model.m, model.neuron_ages if is_ageing else None)
+                            print_quantization_report(base_quant, is_ageing, model.m, model.neuron_ages if is_ageing else None)
                     
             if step % (args.log_interval * 10) == 0:
                 print(f"  Step {step}/{n_steps} | Loss {loss.item():.4f} | Fisher PR {pr_f:.2f} | Width {model.m}")
+            
+            wandb.log({
+                "train/loss": loss.item(),
+                "metrics/fisher_pr": pr_f,
+                "metrics/eta": eta,
+                "metrics/d_pr": d_pr if d_pr != float('inf') else 0,
+                "model/width": model.m,
+                "train/step": step
+            })
                 
+    wandb.finish()
     return {
         'losses': losses,
         'eff_ranks': eff_ranks,
@@ -378,7 +441,7 @@ def main():
     parser.add_argument("--m_start", type=int, default=10)
     parser.add_argument("--m_max", type=int, default=60)
     parser.add_argument("--batch_size", type=int, default=1024)
-    parser.add_argument("--n_steps", type=int, default=10000)
+    parser.add_argument("--n_steps", type=int, default=20000)
     parser.add_argument("--log_interval", type=int, default=50)
     parser.add_argument("--patience", type=int, default=10, help="Check intervals before trigger")
     parser.add_argument("--tolerance", type=float, default=0.05, help="Eff Rank delta tolerance")
