@@ -303,19 +303,25 @@ def run_experiment(base_quant, is_ageing, args, device):
                 plateau_counter += 1
                 
             # TRIGGER FPE DETONATION!
-            if plateau_counter >= patience and model.m < args.m_max:
-                print(f"  [Step {step}] 🎯 Triggering FPE! EffRank plateaued at {erank:.3f}")
-                res, new_W, new_m = split_polysemantic_neurons(model, poly_scores)
-                if res:
-                    model.W = nn.Parameter(new_W)
-                    model.m = new_m
-                    
-                    # Rebuild optimizer
-                    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=base_wd)
-                    best_eff_rank = compute_effective_rank(new_W.T @ new_W)
-                    plateau_counter = 0
-                    fpe_events.append({'step': step, 'm': new_m, 'eff_rank': best_eff_rank})
-                    print(f"  --> Detonated to {new_m} widths! New D_pr: {best_eff_rank:.3f}")
+            if plateau_counter >= patience:
+                if model.m < args.m_max:
+                    print(f"  [Step {step}] 🎯 Triggering FPE! EffRank plateaued at {erank:.3f}")
+                    res, new_W, new_m = split_polysemantic_neurons(model, poly_scores)
+                    if res:
+                        model.W = nn.Parameter(new_W)
+                        model.m = new_m
+                        
+                        # Rebuild optimizer
+                        base_lr *= 0.5
+                        lr = get_lr(step, base_lr, n_steps)
+                        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=base_wd)
+                        best_eff_rank = compute_effective_rank(new_W.T @ new_W)
+                        plateau_counter = 0
+                        fpe_events.append({'step': step, 'm': new_m, 'eff_rank': best_eff_rank})
+                        print(f"  --> Detonated to {new_m} widths! New D_pr: {best_eff_rank:.3f}")
+                elif plateau_counter >= patience * 2:
+                    print(f"  [Step {step}] 🛑 Early stopping! Model saturated at max width {args.m_max}.")
+                    break
                     
             if step % (args.log_interval * 10) == 0:
                 print(f"  Step {step}/{n_steps} | Loss {loss.item():.4f} | Fisher PR {erank:.2f} | Width {model.m}")

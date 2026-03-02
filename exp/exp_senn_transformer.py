@@ -500,27 +500,33 @@ def run_transformer_experiment(base_quant, is_ageing, args, device, train_data, 
                 plateau_counter = 0
             
             # TRIGGER FPE DETONATION! (D_PR Plateau AND Delta Eta)
-            if plateau_counter >= args.patience and model.ffn.d_ff < args.d_ff_max:
-                
-                # Estimate Delta Eta
-                threshold_var = torch.median(F_diag)
-                prop_variance = F_diag[F_diag >= threshold_var].sum() / F_diag.sum()
-                delta_eta = eta * prop_variance.item()
-                
-                req_delta = tau * (eta / pr_f)
-                
-                if delta_eta >= req_delta:
-                    print(f"  [Step {step}] 🎯 Triggering FPE! D_PR={d_pr:.4f} & dEta={delta_eta:.4f} >= {req_delta:.4f}")
-                    new_d_ff = geometric_detonate_layer(model.ffn, growth_factor=args.growth_factor)
+            if plateau_counter >= args.patience:
+                if model.ffn.d_ff < args.d_ff_max:
                     
-                    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=base_wd)
-                    pr_history.clear() 
-                    plateau_counter = 0
-                    fpe_events.append({'step': step, 'flops': accumulated_flops, 'd_ff': new_d_ff, 'erank': pr_f})
-                    print(f"  --> Detonated to {new_d_ff} widths!")
+                    # Estimate Delta Eta
+                    threshold_var = torch.median(F_diag)
+                    prop_variance = F_diag[F_diag >= threshold_var].sum() / F_diag.sum()
+                    delta_eta = eta * prop_variance.item()
                     
-                    # Print post-detonation report
-                    print_quantization_report(base_quant, is_ageing, model.ffn.d_ff, model.ffn.neuron_ages if is_ageing else None)
+                    req_delta = tau * (eta / pr_f)
+                    
+                    if delta_eta >= req_delta:
+                        print(f"  [Step {step}] 🎯 Triggering FPE! D_PR={d_pr:.4f} & dEta={delta_eta:.4f} >= {req_delta:.4f}")
+                        new_d_ff = geometric_detonate_layer(model.ffn, growth_factor=args.growth_factor)
+                        
+                        base_lr *= 0.5
+                        lr = get_lr(step, base_lr, steps)
+                        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=base_wd)
+                        pr_history.clear() 
+                        plateau_counter = 0
+                        fpe_events.append({'step': step, 'flops': accumulated_flops, 'd_ff': new_d_ff, 'erank': pr_f})
+                        print(f"  --> Detonated to {new_d_ff} widths!")
+                        
+                        # Print post-detonation report
+                        print_quantization_report(base_quant, is_ageing, model.ffn.d_ff, model.ffn.neuron_ages if is_ageing else None)
+                elif plateau_counter >= args.patience * 2:
+                    print(f"  [Step {step}] 🛑 Early stopping! Model saturated at max width {args.d_ff_max}.")
+                    break
 
             if step % (log_interval * 5) == 0:
                  print(f"  Step {step:4d} | Val PPL {math.exp(val_loss):.2f} | Fisher PR {pr_f:4.2f} | d_ff {model.ffn.d_ff}")

@@ -389,30 +389,35 @@ def run_experiment(base_quant, is_ageing, args, device):
                 plateau_counter = 0
                 
             # --- DUAL CONDITIONAL TRIGGER (D_PR < eps AND Delta_Eta >= tau * eta_0 / rho_0) ---
-            if plateau_counter >= patience and model.m < args.m_max:
-                # Estimate Delta Eta from the top 50% saturated neurons
-                threshold_var = torch.median(F_diag)
-                prop_variance = F_diag[F_diag >= threshold_var].sum() / F_diag.sum()
-                delta_eta = eta * prop_variance.item()
-                
-                req_delta = tau * (eta / pr_f)
-                
-                if delta_eta >= req_delta:
-                    print(f"  [Step {step}] 🎯 Triggering FPE! D_PR={d_pr:.4f} & dEta={delta_eta:.4f} >= {req_delta:.4f}")
-                    res = split_polysemantic_neurons(model, F_diag)
-                    if res != False:
-                        _, new_W, new_m = res
-                        model.W = nn.Parameter(new_W)
-                        model.m = new_m
-                        
-                        # Rebuild optimizer
-                        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=base_wd)
-                        pr_history.clear()
-                        plateau_counter = 0
-                        fpe_events.append({'step': step, 'm': new_m, 'eff_rank': pr_f})
-                        print(f"  --> Detonated to {new_m} widths! New FIM PR: {compute_fisher_pr(hidden.grad):.3f}")
-                        
+            if plateau_counter >= patience:
+                if model.m < args.m_max:
+                    # Estimate Delta Eta from the top 50% saturated neurons
+                    threshold_var = torch.median(F_diag)
+                    prop_variance = F_diag[F_diag >= threshold_var].sum() / F_diag.sum()
+                    delta_eta = eta * prop_variance.item()
+                    
+                    req_delta = tau * (eta / pr_f)
+                    
+                    if delta_eta >= req_delta:
+                        print(f"  [Step {step}] 🎯 Triggering FPE! D_PR={d_pr:.4f} & dEta={delta_eta:.4f} >= {req_delta:.4f}")
+                        res = split_polysemantic_neurons(model, F_diag)
+                        if res != False:
+                            _, new_W, new_m = res
+                            model.W = nn.Parameter(new_W)
+                            model.m = new_m
+                            
+                            # Rebuild optimizer
+                            base_lr *= 0.5
+                            lr = get_lr(step, base_lr, n_steps)
+                            optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=base_wd)
+                            pr_history.clear()
+                            plateau_counter = 0
+                            fpe_events.append({'step': step, 'm': new_m, 'eff_rank': pr_f})
+                            print(f"  --> Detonated to {new_m} widths! New FIM PR: {compute_fisher_pr(hidden.grad):.3f}")
                             print_quantization_report(base_quant, is_ageing, model.m, model.neuron_ages if is_ageing else None)
+                elif plateau_counter >= patience * 2:
+                    print(f"  [Step {step}] 🛑 Early stopping! Model saturated at max width {args.m_max}.")
+                    break
                     
             if step % (args.log_interval * 10) == 0:
                 print(f"  Step {step}/{n_steps} | Loss {loss.item():.4f} | Fisher PR {pr_f:.2f} | Width {model.m}")

@@ -540,16 +540,22 @@ def run_transformer_experiment(base_quant, is_ageing, args, device, train_data, 
             else:
                 plateau_counter += 1
                 
-            if plateau_counter >= args.patience and model.layers[0].ffn.d_ff < args.d_ff_max:
-                print(f"  [Step {step}] 🎯 Triggering FPE! EffRank plateaued at {erank:.2f}")
-                for layer in model.layers:
-                    new_d_ff = geometric_detonate_layer(layer.ffn, growth_factor=args.growth_factor)
-                
-                optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=base_wd)
-                best_erank = 0.0 # reset search
-                plateau_counter = 0
-                fpe_events.append({'step': step, 'flops': accumulated_flops, 'd_ff': new_d_ff, 'erank': erank})
-                print(f"  --> Detonated all layers to {new_d_ff} widths!")
+            if plateau_counter >= args.patience:
+                if model.layers[0].ffn.d_ff < args.d_ff_max:
+                    print(f"  [Step {step}] 🎯 Triggering FPE! EffRank plateaued at {erank:.2f}")
+                    for layer in model.layers:
+                        new_d_ff = geometric_detonate_layer(layer.ffn, growth_factor=args.growth_factor)
+                    
+                    base_lr *= 0.5
+                    lr = get_lr(step, base_lr, steps)
+                    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=base_wd)
+                    best_erank = 0.0 # reset search
+                    plateau_counter = 0
+                    fpe_events.append({'step': step, 'flops': accumulated_flops, 'd_ff': new_d_ff, 'erank': erank})
+                    print(f"  --> Detonated all layers to {new_d_ff} widths!")
+                elif plateau_counter >= args.patience * 2:
+                    print(f"  [Step {step}] 🛑 Early stopping! Model saturated at max width {args.d_ff_max}.")
+                    break
 
             if step % (log_interval * 5) == 0:
                  print(f"  Step {step:4d} | Val Loss {val_loss:.4f} | E-Rnk {erank:4.2f} | d_ff {model.layers[0].ffn.d_ff}")
