@@ -497,6 +497,21 @@ def run_transformer_experiment(base_quant, is_ageing, args, device, train_data, 
         return model.d_model * model.layers[0].ffn.d_ff * 2 * batch_size * seq_len * len(model.layers)
     
     for step in range(steps):
+        # ----------------------------------------------------
+        # Terminal Control Implementation:
+        # Check an external control.flag file every 50 steps
+        # to allow the user to type `echo "skip" > control.flag` 
+        # to skip the current running loop.
+        # ----------------------------------------------------
+        if step % 50 == 0 and os.path.exists('control.flag'):
+            with open('control.flag', 'r') as f:
+                cmd = f.read().strip().lower()
+            if 'skip' in cmd:
+                print(f"\n[CONTROL] 🛑 Received 'skip' command from terminal! Aborting step {step} and moving to next experiment...")
+                # Clear flag so it doesn't immediately skip the next experiment
+                os.remove('control.flag') 
+                break
+                
         t0 = time.time()
         xb, yb = get_batch(train_data, seq_len, batch_size, device)
         
