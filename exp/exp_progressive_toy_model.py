@@ -127,38 +127,30 @@ def compute_effective_rank(W):
     effective_rank = torch.exp(entropy)
     return effective_rank.item()
 
-def split_polysemantic_neurons(model):
+def split_polysemantic_neurons(model, poly_scores):
+    """
+    Appends new neurons based on saturation score, but purely additively instead of destructively
+    splitting the existing parameters. This preserves the internal scale (max/mean) of 
+    the parent neurons, avoiding detonating the QAT baselines and exploding earlier loss.
+    """
     device = model.W.device
     W_old = model.W.detach()
     n, m = W_old.shape
     
-    W_norm = W_old / (1e-5 + torch.linalg.norm(W_old, 2, dim=0, keepdim=True))
-    interference = torch.abs(W_norm.T @ W_norm)
-    interference.fill_diagonal_(0)
-    
-    poly_scores = interference.sum(dim=0)
     threshold = torch.median(poly_scores)
     to_expand = (poly_scores >= threshold).nonzero(as_tuple=True)[0]
     
     n_new = len(to_expand)
     if n_new == 0:
-        return False
+        return False, None, None
         
     m_new = m + n_new
     new_ages = model.neuron_ages + 1.0
     spawned_ages = torch.zeros(n_new, dtype=torch.float32)
     model.neuron_ages = torch.cat([new_ages, spawned_ages])
     
-    W_spawn = torch.zeros(n, n_new, device=device)
-    for idx, parent_col in enumerate(to_expand):
-        w = W_old[:, parent_col]
-        conn_idx = (w.abs() > 1e-5).nonzero(as_tuple=True)[0]
-        if len(conn_idx) > 1:
-            mid = len(conn_idx) // 2
-            child_conns = conn_idx[mid:]
-            parent_conns = conn_idx[:mid]
-            W_spawn[:, idx][child_conns] = w[child_conns]
-            W_old[:, parent_col][child_conns] = 0.0 
+    # Init cleanly without destroying parent weights (like the Transformer code)
+    W_spawn = torch.randn(n, n_new, device=device) * 0.02
     
     new_W = torch.cat([W_old, W_spawn], dim=1)
     
@@ -168,7 +160,7 @@ def split_polysemantic_neurons(model):
 
 def get_lr(step, lr, n_steps, warmup_steps=1000):
         step = step + 1
-        min_lr = 0.05 * lr
+        min_lr = 0.2 * lr
         if warmup_steps < n_steps:
             if step < warmup_steps:
                 return lr * step / warmup_steps
@@ -206,9 +198,10 @@ def run_experiment(base_quant, is_ageing, args, device):
     ).to(device)
     
     # Base LR for this run
-    base_lr = 5e-3 if base_quant == 'Ternary' else 1e-3
+    base_lr = 1e-2 if base_quant in ['Ternary', 'iq2_xxs', 'q2_k'] else 2e-3
+    base_wd = 0.0 if base_quant in ['Ternary', 'iq2_xxs', 'q2_k'] else 1e-2
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=base_lr, weight_decay=1e-2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=base_lr, weight_decay=base_wd)
     
     losses = []
     eff_ranks = []
@@ -240,6 +233,9 @@ def run_experiment(base_quant, is_ageing, args, device):
             with torch.no_grad():
                 W_norm = model.W / (1e-5 + torch.linalg.norm(model.W, 2, dim=0, keepdim=True))
                 # compute true D_pr alternative over batch
+                interference = torch.abs(W_norm.T @ W_norm)
+                interference.fill_diagonal_(0)
+                poly_scores = interference.sum(dim=0)
                 erank = compute_effective_rank(W_norm.T @ W_norm)
                 
             losses.append(loss.item())
@@ -255,14 +251,13 @@ def run_experiment(base_quant, is_ageing, args, device):
             # TRIGGER FPE DETONATION!
             if plateau_counter >= patience and model.m < args.m_max:
                 print(f"  [Step {step}] 🎯 Triggering FPE! EffRank plateaued at {erank:.3f}")
-                res = split_polysemantic_neurons(model)
-                if res != False:
-                    _, new_W, new_m = res
+                res, new_W, new_m = split_polysemantic_neurons(model, poly_scores)
+                if res:
                     model.W = nn.Parameter(new_W)
                     model.m = new_m
                     
                     # Rebuild optimizer
-                    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
+                    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=base_wd)
                     best_eff_rank = compute_effective_rank(new_W.T @ new_W)
                     plateau_counter = 0
                     fpe_events.append({'step': step, 'm': new_m, 'eff_rank': best_eff_rank})

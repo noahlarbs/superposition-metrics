@@ -20,11 +20,12 @@ def get_batch(data, seq_len, batch_size, device):
     return x.to(device), y.to(device)
 
 def get_lr(step, base_lr, total_steps, warmup_steps=1000):
+    min_lr = 0.2 * base_lr
     if step < warmup_steps:
         return base_lr * (step + 1) / warmup_steps
     else:
         progress = (step - warmup_steps) / (total_steps - warmup_steps)
-        return base_lr * 0.5 * (1.0 + math.cos(math.pi * progress))
+        return (base_lr - min_lr) * 0.5 * (1.0 + math.cos(math.pi * progress)) + min_lr
 
 
 # ======================================================================
@@ -288,8 +289,9 @@ def run_transformer_experiment(base_quant, is_ageing, args, device, train_data, 
         base_quant=base_quant, is_ageing=is_ageing
     ).to(device)
     
-    base_lr = 1e-3 if base_quant != 'Ternary' else 5e-3
-    optimizer = torch.optim.AdamW(model.parameters(), lr=base_lr, weight_decay=0.01)
+    base_lr = 5e-3 if base_quant in ['Ternary', 'iq2_xxs', 'q2_k'] else 1e-3
+    base_wd = 0.0 if base_quant in ['Ternary', 'iq2_xxs', 'q2_k'] else 0.01
+    optimizer = torch.optim.AdamW(model.parameters(), lr=base_lr, weight_decay=base_wd)
     
     steps = args.n_steps
     log_interval = args.log_interval
@@ -355,7 +357,7 @@ def run_transformer_experiment(base_quant, is_ageing, args, device, train_data, 
                 print(f"  [Step {step}] 🎯 Triggering FPE! EffRank plateaued at {erank:.2f}")
                 new_d_ff = geometric_detonate_layer(model.ffn, growth_factor=args.growth_factor)
                 
-                optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+                optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=base_wd)
                 best_erank = 0.0 # reset search
                 plateau_counter = 0
                 fpe_events.append({'step': step, 'flops': accumulated_flops, 'd_ff': new_d_ff, 'erank': erank})
