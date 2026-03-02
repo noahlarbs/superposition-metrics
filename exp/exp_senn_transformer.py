@@ -77,6 +77,49 @@ def apply_precision_age(w, age, base_quant_fn):
     else:
         return base_quant_fn(w)
 
+def print_quantization_report(base_quant, is_ageing, widths, ages=None):
+    """
+    Validation check to output theoretical BPW and hardware datatype packing requirements.
+    """
+    total_params = sum(widths) if isinstance(widths, list) else widths
+    
+    quant_info = {
+        'W8A16':   {'bits': 8, 'dtype': 'int8'},
+        'W4A8':    {'bits': 4, 'dtype': 'int4 (packed in int8)'},
+        'Ternary': {'bits': 2, 'dtype': 'int2 (packed in int8)'},
+        'q2_k':    {'bits': 2, 'dtype': 'int2 (packed in int8)'},
+        'iq2_xxs': {'bits': 2, 'dtype': 'int2 (packed in int8)'},
+    }
+    
+    tgt = quant_info.get(base_quant, {'bits': 32, 'dtype': 'fp32'})
+    
+    if not is_ageing or ages is None:
+        bpw = tgt['bits']
+        print(f"  [Quantization Report] Fixed {base_quant}: ~{bpw:.2f} bpw | Target Hardware Packing: {tgt['dtype']}")
+        return
+        
+    # Calculate BPW based on precision ageing rules
+    bits_sum = 0
+    for a in ages:
+        if a == 0: bits_sum += 32
+        elif a == 1: bits_sum += 16
+        elif a == 2: bits_sum += 8
+        else: bits_sum += tgt['bits']
+        
+    avg_bpw = bits_sum / len(ages)
+    
+    # Detail the distribution
+    age_counts = {0: 0, 1: 0, 2: 0, 3: 0}
+    for a in ages:
+        a_idx = int(a) if a < 3 else 3
+        age_counts[a_idx] += 1
+        
+    print(f"  [Quantization Report] FPE Mixed Precision BPW: {avg_bpw:.2f} bits/weight")
+    print(f"    - {age_counts[0]:4d} neurons @ fp32")
+    print(f"    - {age_counts[1]:4d} neurons @ fp16")
+    print(f"    - {age_counts[2]:4d} neurons @ int8")
+    print(f"    - {age_counts[3]:4d} neurons @ {tgt['dtype']} ({base_quant})")
+
 # ======================================================================
 # PROGRESSIVE FFN LAYER
 # ======================================================================
@@ -325,11 +368,15 @@ def run_transformer_experiment(base_quant, is_ageing, args, device, train_data, 
     fpe_events = []
     proxy_flops = []
     
+    best_erank = 0.0
     plateau_counter = 0
     accumulated_flops = 0.0
     pr_history = []
     tau = 0.05
     tolerance = args.tolerance # epsilon for D_PR
+    
+    # Print initial report
+    print_quantization_report(base_quant, is_ageing, model.ffn.d_ff, model.ffn.neuron_ages if is_ageing else None)
     
     # Parameter scaling cost heuristic
     def get_step_flops():
@@ -413,6 +460,9 @@ def run_transformer_experiment(base_quant, is_ageing, args, device, train_data, 
                     plateau_counter = 0
                     fpe_events.append({'step': step, 'flops': accumulated_flops, 'd_ff': new_d_ff, 'erank': pr_f})
                     print(f"  --> Detonated to {new_d_ff} widths!")
+                    
+                    # Print post-detonation report
+                    print_quantization_report(base_quant, is_ageing, model.ffn.d_ff, model.ffn.neuron_ages if is_ageing else None)
 
             if step % (log_interval * 5) == 0:
                  print(f"  Step {step:4d} | Val Loss {val_loss:.4f} | Fisher PR {pr_f:4.2f} | d_ff {model.ffn.d_ff}")
