@@ -37,6 +37,13 @@ try:
         if current_part == 1 or current_part == 2:
             continue
             
+        # --- GLOBAL TOLERANCE SWEEP ---
+        # User requested lowering expansion tolerance from 0.1 to 0.05 across all blocks
+        if "--tolerance" in source:
+             source = source.replace('default=0.10', 'default=0.05').replace('default=0.1)', 'default=0.05)')
+             source = source.replace('default=0.5', 'default=0.05') # Catch generic FPE variants just in case
+             cell['source'] = [line + ('\n' if not line.endswith('\n') else '') for line in source.split('\n')]
+            
         # Distribute cells to nodes
         if current_part == 3: part3_cells.append(cell)
         elif current_part == 4 or current_part == 5: part4_cells.append(cell) # L3 context belongs to Transformers
@@ -53,7 +60,7 @@ try:
         with open(out_paths[pt], 'w') as f:
             json.dump(nb_copy, f, indent=2)
             
-    print(f"\n✅ Successfully split notebook into exactly 3 parallel node files!")
+    print(f"\n✅ Successfully split notebook into exactly 3 parallel node files with Tolerance=0.05!")
     for p in out_paths.values(): print(f"  - {p}")
 except Exception as e:
     print(f"Error process notebook: {e}")
