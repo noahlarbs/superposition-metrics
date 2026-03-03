@@ -59,10 +59,13 @@ try:
              core_imports.append(cell)
              continue
             
-        # Distribute cells to nodes
-        if current_part == 3: part3_cells.append(cell)
-        elif current_part == 4: part4_cells.append(cell)
-        elif current_part == 6: part6_cells.append(cell)
+        # Strict Isolation: Distribute cells to exactly one node
+        if current_part == 3 and "ProgressiveTransformer" not in source: 
+             part3_cells.append(cell)
+        elif current_part == 4 and "ToyModel" not in source: 
+             part4_cells.append(cell)
+        elif current_part == 6 and "ToyModel" not in source and "ProgressiveTransformer" not in source: 
+             part6_cells.append(cell)
         
     # Inject Live Logger to imports
     if len(core_imports) == 0:
@@ -79,6 +82,6 @@ try:
         with open(out_paths[pt], 'w') as f:
             json.dump(nb_copy, f, indent=2)
             
-    print(f"\n✅ Successfully generated clean execution nodes.")
+    print(f"\n✅ Successfully generated strict isolated execution nodes.")
 except Exception as e:
     print(f"Error process notebook: {e}")
