@@ -30,23 +30,23 @@ try:
         # Detect partitions
         if "Part 3:" in source: current_part = 3
         elif "Part 4:" in source: current_part = 4
-        elif "Part 5:" in source: current_part = 5 # Used internally in Part 2 and 4
+        elif "Part 5:" in source: current_part = 5 # QTIP / YAQA (User wants this DELETED)
         elif "Part 6:" in source: current_part = 6
         
-        # Fast exit Toy Model blocks
-        if current_part == 1 or current_part == 2:
+        # Fast exit unwanted blocks (Part 1, Part 2, Part 5)
+        if current_part in [1, 2, 5]:
             continue
             
         # --- GLOBAL TOLERANCE SWEEP ---
-        # User requested lowering expansion tolerance from 0.1 to 0.05 across all blocks
+        # Lower expansion tolerance from 0.1 to 0.05
         if "--tolerance" in source:
              source = source.replace('default=0.10', 'default=0.05').replace('default=0.1)', 'default=0.05)')
-             source = source.replace('default=0.5', 'default=0.05') # Catch generic FPE variants just in case
+             source = source.replace('default=0.5', 'default=0.05')
              cell['source'] = [line + ('\n' if not line.endswith('\n') else '') for line in source.split('\n')]
             
         # Distribute cells to nodes
         if current_part == 3: part3_cells.append(cell)
-        elif current_part == 4 or current_part == 5: part4_cells.append(cell) # L3 context belongs to Transformers
+        elif current_part == 4: part4_cells.append(cell)
         elif current_part == 6: part6_cells.append(cell)
         
     # Inject Live Logger to imports
@@ -60,7 +60,6 @@ try:
         with open(out_paths[pt], 'w') as f:
             json.dump(nb_copy, f, indent=2)
             
-    print(f"\n✅ Successfully split notebook into exactly 3 parallel node files with Tolerance=0.05!")
-    for p in out_paths.values(): print(f"  - {p}")
+    print(f"\n✅ Successfully split notebook. Part 5 (QTIP) has been completely PURGED!")
 except Exception as e:
     print(f"Error process notebook: {e}")
